@@ -218,10 +218,6 @@ Both cards are in the same JavaScript file. With one aquarium no configuration i
 needed. With several, set `auto_entity` to the aquarium's toggle so the card
 knows which one it shows.
 
-![Alt text](images/display_card.png)
-
-![Alt text](images/config_card.png)
-
 ### Schedule editor (config dashboard)
 
 ```yaml
@@ -242,6 +238,8 @@ show_all: true                             # optional: default for "Show all cha
   visible channel's level at that time.
 - Saving and deleting require an HA admin user.
 
+![Alt text](images/config_card.png)
+
 ### Graph only (main display)
 
 ```yaml
@@ -255,6 +253,8 @@ show_legend: true                          # optional: channel names + current %
 Every channel is drawn at full opacity in its own colour with the current-time
 line, refreshed every minute. Very light or very dark colours get a thin grey
 outline so they stay visible on any theme.
+
+![Alt text](images/display_card.png)
 
 ### Websocket API
 
