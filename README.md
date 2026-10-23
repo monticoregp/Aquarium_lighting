@@ -218,6 +218,10 @@ Both cards are in the same JavaScript file. With one aquarium no configuration i
 needed. With several, set `auto_entity` to the aquarium's toggle so the card
 knows which one it shows.
 
+![Alt text](images/display_card.png)
+
+![Alt text](images/config_card.png)
+
 ### Schedule editor (config dashboard)
 
 ```yaml
