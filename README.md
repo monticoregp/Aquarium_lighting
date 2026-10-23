@@ -62,15 +62,6 @@ lovelace:
 If a card still says "Custom element doesn't exist", restart Home Assistant and
 hard-refresh the browser (Ctrl+Shift+R).
 
-### Upgrading from 0.1
-
-- The `switch.aquarium_auto_mode` entity is gone and is removed automatically.
-- Create the toggle helper (step 3). Older entries default to
-  `input_boolean.aquarium_auto_mode`; to use a different helper, open the
-  integration's **Configure** and pick it.
-- Delete the old `switch.py` from the integration folder (it is no longer used).
-- Schedules are kept.
-
 ---
 
 ## How it works
@@ -313,8 +304,7 @@ tests/test_light_controller.py         engine tests (run with pytest, no HA need
 - **Nothing about current brightness is persisted.** Only schedules and the
   auto flag are. A restart, a pause of any length, or an edit cannot cause drift.
 - **Time zone:** schedules use Home Assistant's configured time zone. During a DST
-  change the wall clock jumps, so a ramp in progress jumps with it; this is
-  usually what you want for a day/night cycle.
+  change the wall clock jumps, so a ramp in progress jumps with it.
 - **Several aquariums:** add the integration once per aquarium, each with its own
   toggle, channels and output mode. Entries are matched to cards by `auto_entity`.
 - **Granularity:** the engine runs once a minute; smoothness within the minute
@@ -333,17 +323,3 @@ tests/test_light_controller.py         engine tests (run with pytest, no HA need
 | REST 404 | The ESPHome path differs by version; test with `curl`, then paste the working base URL |
 | MQTT mode does nothing | MQTT integration must be configured; use the light's actual command topic |
 
-## Tests
-
-```bash
-pip install pytest-homeassistant-custom-component   # needs Python 3.13+
-pytest tests/
-```
-
-- `tests/test_light_controller.py`: the brightness engine (plateaus, ramp shape and
-  continuity, midnight wrap, multi-segment, validation, look-ahead smoothing model).
-  These also run with plain `pytest` and no Home Assistant.
-- `tests/test_integration.py`: runs in a real Home Assistant: setup, the per-channel
-  entities, editing through entities, refusal of invalid values, auto mode following
-  the `input_boolean` and pushing to lights, and adding/deleting channels over the
-  websocket API.
