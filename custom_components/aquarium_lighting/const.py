@@ -1,7 +1,7 @@
 """Constants for Aquarium Lighting."""
 
 DOMAIN = "aquarium_lighting"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 CONF_AUTO_ENTITY = "auto_entity"  # input_boolean that switches auto mode on/off
 CONF_OUTPUT_MODE = "output_mode"

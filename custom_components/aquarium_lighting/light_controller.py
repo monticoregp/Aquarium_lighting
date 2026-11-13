@@ -209,6 +209,99 @@ class ChannelSchedule:
 
 
 # --------------------------------------------------------------------------- #
+# moonlight
+# --------------------------------------------------------------------------- #
+# The eight states of Home Assistant's ``sensor.moon_phase``, in cycle order.
+MOON_PHASES = (
+    "new_moon",
+    "waxing_crescent",
+    "first_quarter",
+    "waxing_gibbous",
+    "full_moon",
+    "waning_gibbous",
+    "last_quarter",
+    "waning_crescent",
+)
+# Steps away from the new moon: 0 1 2 3 4 3 2 1. Four steps span min -> max, so
+# each step is a quarter of the way between the new-moon and full-moon levels.
+MOON_STEPS = {phase: min(i, len(MOON_PHASES) - i) for i, phase in enumerate(MOON_PHASES)}
+DEFAULT_MOON_SENSOR = "sensor.moon_phase"
+
+
+def normalize_moon_phase(value: Any) -> str | None:
+    """Return a known phase name for a sensor state, or None (unknown/unavailable)."""
+    phase = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return phase if phase in MOON_STEPS else None
+
+
+@dataclass
+class MoonlightSchedule:
+    """Nightly moonlight for one aquarium (one light, brightness in percent).
+
+    The peak of the night comes from the moon phase: ``min`` at new moon up to
+    ``max`` at full moon in four equal steps. Within the nightly window the
+    light follows a parabola: off at ``start``, peak at the middle of the
+    window, off again at ``end``. The window may cross midnight.
+    """
+
+    enabled: bool = False
+    sensor: str = DEFAULT_MOON_SENSOR  # entity whose state is the moon phase
+    target: str = ""  # HA light entity_id
+    start: str = "21:00"
+    end: str = "01:00"
+    min: int = 10  # percent, at new moon
+    max: int = 50  # percent, at full moon
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        self.enabled = bool(self.enabled)
+        self.sensor = (self.sensor or "").strip() or DEFAULT_MOON_SENSOR
+        self.target = (self.target or "").strip()
+        start, end = parse_hhmm(self.start), parse_hhmm(self.end)
+        if start == end:
+            raise ValueError("Moonlight start and end times must differ")
+        self.start, self.end = format_hhmm(start), format_hhmm(end)
+        self._start, self._end = start, end
+        try:
+            self.min, self.max = int(self.min), int(self.max)
+        except (TypeError, ValueError):
+            raise ValueError("min and max must be whole numbers") from None
+        if not (0 <= self.min <= self.max <= 100):
+            raise ValueError("Need 0 <= min <= max <= 100 (percent)")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MoonlightSchedule":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in dict(data).items() if k in known})
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def in_window(self, minute: float) -> bool:
+        return _progress(minute % MINUTES_PER_DAY, self._start, self._end) is not None
+
+    def peak_percent(self, phase: str | None) -> float | None:
+        """Brightness (percent) at the middle of the window for ``phase``."""
+        steps = MOON_STEPS.get(phase or "")
+        if steps is None:
+            return None
+        return self.min + (self.max - self.min) * steps / 4
+
+    def level_at(self, minute: float, phase: str | None) -> float:
+        """Brightness 0-255 (float) at ``minute`` since midnight; 0 outside the window.
+
+        Unknown phase -> 0, and so is a disabled schedule.
+        """
+        peak = self.peak_percent(phase)
+        p = _progress(minute % MINUTES_PER_DAY, self._start, self._end)
+        if not self.enabled or peak is None or p is None:
+            return 0.0
+        return MAX_LEVEL * (peak / 100.0) * 4.0 * p * (1.0 - p)
+
+
+# --------------------------------------------------------------------------- #
 # public API used by the coordinator / websocket layer
 # --------------------------------------------------------------------------- #
 def compute_brightness(schedule: ChannelSchedule, when: datetime) -> int:

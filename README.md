@@ -166,6 +166,44 @@ HA light entities and use `ha_light`.
 
 ---
 
+## Moonlight
+
+A dim light that follows the moon, one per aquarium. Set it up in **Settings >
+Devices & services > Aquarium Lighting > Configure**: press Submit on the first page
+(output mode and transitions, unchanged), then fill in the second page.
+
+| Setting | Meaning |
+|---|---|
+| Enable moonlight | on/off |
+| Moon phase sensor | default `sensor.moon_phase` (the Moon integration); any sensor whose state is one of `new_moon`, `waxing_crescent`, `first_quarter`, `waxing_gibbous`, `full_moon`, `waning_gibbous`, `last_quarter`, `waning_crescent` works |
+| Moonlight | a Home Assistant `light` entity (the moonlight always uses a light entity, whatever the channel output mode is) |
+| New moon / full moon brightness | peak brightness in %, at new moon and at full moon |
+| Start / end time | the nightly window; may cross midnight (21:00 to 01:00) |
+
+**Brightness.** The peak of the night steps from the new-moon level to the full-moon
+level in four equal steps, so with 10 % and 50 % each step is 10 %:
+
+| phase | new | waxing crescent | first quarter | waxing gibbous | full | waning gibbous | last quarter | waning crescent |
+|---|---|---|---|---|---|---|---|---|
+| peak | 10 % | 20 % | 30 % | 40 % | 50 % | 40 % | 30 % | 20 % |
+
+**Shape.** Inside the window the level is a parabola: off at the start time, the
+peak exactly in the middle, off again at the end. With 21:00-01:00 and a 20 % peak
+the light is on from 21:00, at 15 % at 22:00, 20 % at 23:00, 15 % at 00:00 and off
+at 01:00.
+
+Notes:
+
+- The moonlight only runs while auto mode is on, like the channels.
+- The phase is read when the window opens and kept until it closes, so a sensor that
+  changes at midnight does not make a 21:00-01:00 night jump half-way. If the sensor
+  is briefly unavailable the last known phase is used; if it never had one the light
+  stays off and a warning is logged.
+- Outside the window the light is switched off once, then left alone, so you can use
+  it by hand during the day.
+
+---
+
 ## Entities
 
 Each channel becomes a device (for example **Reef Blue**; a setup carried over from 0.1 has no aquarium name, so its ids start with `aquarium_`) with these entities, so
@@ -184,6 +222,12 @@ assistant without the editor card:
 
 (`<aquarium>` is the name you gave in setup, `<channel>` the channel name; the
 exact ids are shown on the device page.)
+
+The moonlight (below) has its own device, **Reef Moonlight**, with
+`switch.<aquarium>_moonlight_enabled`, `number.<aquarium>_moonlight_new_moon_brightness`,
+`number.<aquarium>_moonlight_full_moon_brightness` (both in %),
+`time.<aquarium>_moonlight_start_time` and `time.<aquarium>_moonlight_end_time`.
+The moon phase sensor and the light are chosen in the options (not entities).
 
 - They are **views of the schedule**, not separate settings: edit one here and the
   editor card shows it; save in the card and these update. If auto mode is on, a
@@ -290,6 +334,7 @@ custom_components/aquarium_lighting/
   config_flow.py       setup + options flow
   entity.py            shared base for the channel entities
   number.py time.py select.py   per-channel min/max, sunrise/sunset times, curve
+  switch.py            moonlight enable (number.py/time.py also hold the moonlight settings)
   api.py               websocket API for the card
   card_resource.py     serves the card script and registers it as a dashboard resource
   const.py             constants

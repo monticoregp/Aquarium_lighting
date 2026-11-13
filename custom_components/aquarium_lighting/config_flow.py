@@ -11,6 +11,7 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     EntitySelector,
     EntitySelectorConfig,
     NumberSelector,
@@ -21,6 +22,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     SelectSelectorMode,
     TextSelector,
+    TimeSelector,
 )
 
 from .const import (
@@ -38,7 +40,7 @@ from .const import (
     MODE_MQTT,
     MODE_REST,
 )
-from .light_controller import validate_channel_name
+from .light_controller import DEFAULT_MOON_SENSOR, validate_channel_name
 
 _MODE_OPTIONS = [
     SelectOptionDict(value=MODE_LIGHT, label="Home Assistant light entities"),
@@ -141,13 +143,67 @@ class AquariumLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class AquariumLightingOptionsFlow(config_entries.OptionsFlow):
-    """Change output mode / transition lengths. Reloads the entry on save."""
+    """Step 1: output mode / transition lengths. Step 2: moonlight.
+
+    Step 1 is kept in the entry options (and reloads the entry). Step 2 is
+    stored with the schedules, like the moonlight entities do, and takes effect
+    immediately.
+    """
+
+    def __init__(self) -> None:
+        self._options: dict[str, Any] = {}
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            self._options = user_input
+            return await self.async_step_moonlight()
         current = {**self.config_entry.data, **self.config_entry.options}
         return self.async_show_form(step_id="init", data_schema=_settings_schema(current))
+
+    async def async_step_moonlight(self, user_input: dict[str, Any] | None = None):
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        if coordinator is None:  # entry failed to load: nothing to configure
+            return self.async_create_entry(data=self._options)
+        errors: dict[str, str] = {}
+        values: dict[str, Any] = coordinator.moonlight.to_dict()
+        if user_input is not None:
+            values = {**values, **user_input, "target": user_input.get("target") or ""}
+            if values["enabled"] and not values["target"]:
+                errors["target"] = "light_required"
+            elif int(values["min"]) > int(values["max"]):
+                errors["base"] = "min_above_max"
+            elif str(values["start"])[:5] == str(values["end"])[:5]:
+                errors["base"] = "same_times"
+            else:
+                try:
+                    await coordinator.async_set_moonlight(values)
+                except ValueError:
+                    errors["base"] = "invalid_moonlight"
+                else:
+                    return self.async_create_entry(data=self._options)
+
+        percent = NumberSelectorConfig(
+            min=0, max=100, step=1, unit_of_measurement="%", mode=NumberSelectorMode.SLIDER
+        )
+        target_key = (
+            vol.Optional("target", description={"suggested_value": values["target"]})
+            if values["target"]
+            else vol.Optional("target")
+        )
+        schema = vol.Schema(
+            {
+                vol.Required("enabled", default=bool(values["enabled"])): BooleanSelector(),
+                vol.Required(
+                    "sensor", default=values["sensor"] or DEFAULT_MOON_SENSOR
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                target_key: EntitySelector(EntitySelectorConfig(domain="light")),
+                vol.Required("min", default=int(values["min"])): NumberSelector(percent),
+                vol.Required("max", default=int(values["max"])): NumberSelector(percent),
+                vol.Required("start", default=f"{str(values['start'])[:5]}:00"): TimeSelector(),
+                vol.Required("end", default=f"{str(values['end'])[:5]}:00"): TimeSelector(),
+            }
+        )
+        return self.async_show_form(step_id="moonlight", data_schema=schema, errors=errors)
 
 
 _TARGET_HELP = {

@@ -42,8 +42,33 @@
           "output_mode": "Output mode",
           "transition_seconds": "Ramp transition (seconds)",
           "resume_transition_seconds": "Resume / edit transition (seconds)"
+        },
+        "description": "Step 1 of 2. The next step sets up the moonlight."
+      },
+      "moonlight": {
+        "title": "Moonlight",
+        "description": "A light that follows the moon phase. Each night it fades up and back down in a parabola between the start and end time. The peak is the new-moon brightness at new moon, rising in four equal steps to the full-moon brightness at full moon. Needs a sensor that reports the moon phase (the Moon integration's sensor.moon_phase by default). Only runs while auto mode is on.",
+        "data": {
+          "enabled": "Enable moonlight",
+          "sensor": "Moon phase sensor",
+          "target": "Moonlight (light entity)",
+          "min": "New moon brightness",
+          "max": "Full moon brightness",
+          "start": "Start time",
+          "end": "End time"
+        },
+        "data_description": {
+          "start": "The window may cross midnight, e.g. 21:00 to 01:00.",
+          "min": "Peak brightness at new moon.",
+          "max": "Peak brightness at full moon."
         }
       }
+    },
+    "error": {
+      "light_required": "Choose the light to use as moonlight, or turn moonlight off.",
+      "min_above_max": "New moon brightness cannot be higher than full moon brightness.",
+      "same_times": "Start and end time must differ.",
+      "invalid_moonlight": "These moonlight settings are not valid."
     }
   }
 }

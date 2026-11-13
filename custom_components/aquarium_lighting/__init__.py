@@ -14,7 +14,7 @@ from .const import DOMAIN
 from .coordinator import AquariumLightingCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.NUMBER, Platform.SELECT, Platform.TIME]
+PLATFORMS = [Platform.NUMBER, Platform.SELECT, Platform.SWITCH, Platform.TIME]
 _GLOBAL_KEY = f"{DOMAIN}_global_setup_done"
 
 

@@ -1,4 +1,4 @@
-"""time entities: sunrise/sunset start and end for each channel."""
+"""time entities: sunrise/sunset per channel, start/end of the moonlight window."""
 from __future__ import annotations
 
 from datetime import time
@@ -8,7 +8,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .entity import ChannelEntity, async_setup_channel_entities
+from .const import DOMAIN
+from .entity import ChannelEntity, MoonlightEntity, async_setup_channel_entities
 from .light_controller import parse_hhmm
 
 _TIMES = (
@@ -28,6 +29,28 @@ async def async_setup_entry(
         async_add_entities,
         lambda coord, e, ch: [ChannelTime(coord, e, ch, k, n, i) for k, n, i in _TIMES],
     )
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities(
+        [MoonlightTime(coordinator, entry, k, n, i) for k, n, i in _MOON_TIMES]
+    )
+
+
+_MOON_TIMES = (
+    ("start", "Start time", "mdi:weather-night"),
+    ("end", "End time", "mdi:weather-night"),
+)
+
+
+class MoonlightTime(MoonlightEntity, TimeEntity):
+    """Nightly window in which the moonlight runs (may cross midnight)."""
+
+    @property
+    def native_value(self) -> time | None:
+        minutes = parse_hhmm(getattr(self._moonlight, self._key))
+        return time(minutes // 60, minutes % 60)
+
+    async def async_set_value(self, value: time) -> None:
+        await self._async_change(**{self._key: f"{value.hour:02d}:{value.minute:02d}"})
 
 
 class ChannelTime(ChannelEntity, TimeEntity):

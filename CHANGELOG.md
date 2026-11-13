@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0
+- New **moonlight**: one light entity per aquarium that follows the moon phase. Set
+  it up under the integration's **Configure** (second page of the options). The moon
+  phase sensor defaults to `sensor.moon_phase` and can be any sensor that reports the
+  same eight phase names.
+- Peak brightness runs from the *new moon* level to the *full moon* level in four
+  equal steps (new moon 0, waxing crescent 1, first quarter 2, waxing gibbous 3,
+  full moon 4, then back down). Each night the light follows a parabola between the
+  start and end time (off, peak in the middle, off), and the window may cross midnight.
+- The phase is read when the night's window opens and kept until it closes, so a
+  sensor that changes at midnight cannot make the light jump mid-window.
+- New entities (device "<aquarium> Moonlight"): enable `switch`, new/full moon
+  brightness `number` (%), start/end `time`.
+- Like the channels, the moonlight only runs while auto mode is on. Outside the
+  window it is switched off once and then left alone, so you can still use it by hand.
+- The websocket `aquarium_lighting/get` result now includes a `moonlight` block.
+
 ## 0.3.1
 - The card script is now registered as a dashboard resource automatically (storage
   mode), with a version-stamped URL so upgrades refresh the browser cache. A resource

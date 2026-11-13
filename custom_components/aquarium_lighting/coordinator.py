@@ -22,7 +22,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import aiohttp
@@ -54,15 +54,18 @@ from .const import (
 )
 from .light_controller import (
     ChannelSchedule,
+    MoonlightSchedule,
     compute_all,
     compute_brightness,
     default_points,
     minute_of_day,
+    normalize_moon_phase,
     preview_curve,
     validate_channel_name,
 )
 
 _LOGGER = logging.getLogger(__name__)
+_MOON_KEY = "(moonlight)"  # failure-tracking key; can never clash with a channel name
 
 
 class AquariumLightingCoordinator:
@@ -72,6 +75,13 @@ class AquariumLightingCoordinator:
         self.hass = hass
         self.entry = entry
         self.schedules: dict[str, ChannelSchedule] = {}
+        self.moonlight = MoonlightSchedule()
+        # In-memory only (never persisted): last phase the sensor reported, the
+        # phase latched for the current night, and the last level sent.
+        self._moon_last_phase: str | None = None
+        self._moon_night_phase: str | None = None
+        self._moon_sent: int | None = None
+        self._moon_warned = False
 
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
@@ -136,6 +146,11 @@ class AquariumLightingCoordinator:
             except ValueError as err:
                 _LOGGER.error("Ignoring invalid schedule for channel %s: %s", name, err)
 
+        try:
+            self.moonlight = MoonlightSchedule.from_dict(data.get("moonlight") or {})
+        except ValueError as err:
+            _LOGGER.error("Ignoring invalid moonlight settings: %s", err)
+
 
     @callback
     def async_start(self) -> None:
@@ -160,7 +175,10 @@ class AquariumLightingCoordinator:
 
     async def _async_save(self) -> None:
         await self._store.async_save(
-            {"channels": {n: s.to_dict() for n, s in self.schedules.items()}}
+            {
+                "channels": {n: s.to_dict() for n, s in self.schedules.items()},
+                "moonlight": self.moonlight.to_dict(),
+            }
         )
 
     # ------------------------------------------------------------------ #
@@ -224,6 +242,17 @@ class AquariumLightingCoordinator:
             data["points"] = default_points(schedule)  # start from the current shape
         await self.async_set_channel(name, data)
 
+    async def async_set_moonlight(self, data: dict[str, Any]) -> None:
+        """Replace the moonlight settings (validated, saved, applied at once)."""
+        self.moonlight = MoonlightSchedule.from_dict(data)  # may raise ValueError
+        await self._async_save()
+        self.request_refresh()
+        self._notify()
+
+    async def async_update_moonlight(self, changes: dict[str, Any]) -> None:
+        """Change some moonlight fields (used by the moonlight entities)."""
+        await self.async_set_moonlight({**self.moonlight.to_dict(), **changes})
+
     async def async_delete_channel(self, name: str) -> None:
         if name not in self.schedules:
             raise ValueError(f"Unknown channel {name!r}")
@@ -253,6 +282,11 @@ class AquariumLightingCoordinator:
             "mode": self.mode,
             "now_minute": minute_of_day(now),
             "channels": {n: s.to_dict() for n, s in self.schedules.items()},
+            "moonlight": {
+                **self.moonlight.to_dict(),
+                "phase": self._moon_last_phase,
+                "peak_percent": self.moonlight.peak_percent(self._moon_last_phase),
+            },
             "current": compute_all(self.schedules, now),
             "curves": {n: preview_curve(s, 10) for n, s in self.schedules.items()},
         }
@@ -313,6 +347,8 @@ class AquariumLightingCoordinator:
             jobs.append(
                 self._async_push(sched.target, compute_brightness(sched, when), transition)
             )
+        names.append(_MOON_KEY)
+        jobs.append(self._async_apply_moonlight(when, transition, resume))
 
         for name, result in zip(names, await asyncio.gather(*jobs, return_exceptions=True)):
             if isinstance(result, Exception):
@@ -322,6 +358,61 @@ class AquariumLightingCoordinator:
             elif name in self._failing:
                 _LOGGER.info("Channel %s: recovered", name)
                 self._failing.discard(name)
+
+    # ------------------------------------------------------------------ #
+    # moonlight
+    # ------------------------------------------------------------------ #
+    def _read_moon_phase(self) -> str | None:
+        """Current phase from the configured sensor, remembering the last good one.
+
+        A sensor that is briefly unavailable (restart, integration reload) keeps
+        the last known phase rather than switching the moonlight off.
+        """
+        state = self.hass.states.get(self.moonlight.sensor)
+        phase = normalize_moon_phase(state.state if state else None)
+        if phase is not None:
+            self._moon_last_phase = phase
+        return self._moon_last_phase
+
+    def moon_level(self, when: datetime) -> int:
+        """Moonlight brightness 0-255 at ``when``.
+
+        The phase is read once when a night's window opens and kept until it
+        closes, so a sensor that rolls over at midnight cannot make the level
+        jump half-way through a window that crosses midnight.
+        """
+        cfg = self.moonlight
+        minute = minute_of_day(when)
+        if not cfg.enabled or not cfg.in_window(minute):
+            self._moon_night_phase = None
+            return 0
+        if self._moon_night_phase is None:
+            self._moon_night_phase = self._read_moon_phase()
+            if self._moon_night_phase is None and not self._moon_warned:
+                self._moon_warned = True
+                _LOGGER.warning(
+                    "Moonlight: %s has no usable moon phase (need one of new_moon, "
+                    "waxing_crescent, first_quarter, ... ); the moonlight stays off. "
+                    "The default sensor.moon_phase comes from the Moon integration.",
+                    cfg.sensor,
+                )
+        return int(round(cfg.level_at(minute, self._moon_night_phase)))
+
+    async def _async_apply_moonlight(
+        self, when: datetime, transition: int, resume: bool
+    ) -> None:
+        cfg = self.moonlight
+        level = self.moon_level(when)
+        if not cfg.target:
+            return
+        if not cfg.enabled and not self._moon_sent:
+            return  # disabled and nothing of ours left on: not ours to touch
+        if level == 0 and self._moon_sent == 0 and not resume:
+            # Already off: leave the light alone so it can be used by hand
+            # outside the window. A resume (start-up, auto on, edit) re-asserts it.
+            return
+        await self._push_light(cfg.target, level, transition)
+        self._moon_sent = level
 
     # ------------------------------------------------------------------ #
     # output back-ends
