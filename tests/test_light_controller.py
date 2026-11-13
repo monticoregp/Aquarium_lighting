@@ -215,3 +215,82 @@ def test_default_points_handle_midnight_crossing_ramp():
     assert 10 < pts[0][1] < 255  # midnight is part-way down the sunset ramp, not "min"
     seeded = lc.ChannelSchedule.from_dict({**base.to_dict(), "curve": "multi_segment", "points": pts})
     assert abs(lc.compute_brightness(seeded, at("23:30")) - lc.compute_brightness(base, at("23:30"))) <= 1
+
+
+# --------------------------------------------------------------------------- #
+# moonlight
+# --------------------------------------------------------------------------- #
+def moon(**over):
+    base = {"enabled": True, "target": "light.moon", "start": "21:00", "end": "01:00", "min": 10, "max": 50}
+    return lc.MoonlightSchedule.from_dict({**base, **over})
+
+
+def minutes(hhmm):
+    return lc.parse_hhmm(hhmm)
+
+
+def test_moon_peak_rises_in_four_equal_steps_and_is_symmetric():
+    m = moon()
+    peaks = {p: m.peak_percent(p) for p in lc.MOON_PHASES}
+    assert peaks["new_moon"] == 10
+    assert peaks["waxing_crescent"] == 20  # (50-10)/4 + 10
+    assert peaks["first_quarter"] == 30
+    assert peaks["waxing_gibbous"] == 40
+    assert peaks["full_moon"] == 50
+    # waning side mirrors the waxing side
+    assert peaks["waning_gibbous"] == 40
+    assert peaks["last_quarter"] == 30
+    assert peaks["waning_crescent"] == 20
+    assert m.peak_percent("nonsense") is None and m.peak_percent(None) is None
+
+
+def test_moon_worked_example_parabola_across_midnight():
+    # 21:00-01:00, one quarter step above new moon: peak 20% = 51/255 at 23:00.
+    m = moon()
+    lvl = lambda hhmm: m.level_at(minutes(hhmm), "waxing_crescent")
+    assert lvl("20:59") == 0  # before the window
+    assert lvl("21:00") == 0  # starts from off
+    assert lvl("23:00") == pytest.approx(255 * 0.20)  # peak in the middle
+    assert lvl("22:00") == pytest.approx(255 * 0.20 * 0.75)  # parabola, not linear
+    assert lvl("00:00") == pytest.approx(255 * 0.20 * 0.75)  # symmetric
+    assert lvl("01:00") == pytest.approx(0, abs=1e-9)  # back to off at the end
+    assert lvl("01:01") == 0 and lvl("12:00") == 0
+    assert lvl("22:00") == pytest.approx(lvl("00:00"))
+
+
+def test_moon_first_quarter_is_two_steps_not_one():
+    # The 8-state sensor: first_quarter is 2 steps from new moon -> 30% here.
+    m = moon()
+    assert m.level_at(minutes("23:00"), "first_quarter") == pytest.approx(255 * 0.30)
+
+
+def test_moon_window_inside_one_day():
+    m = moon(start="20:00", end="22:00")
+    assert m.in_window(minutes("21:00")) and not m.in_window(minutes("23:00"))
+    assert m.level_at(minutes("21:00"), "full_moon") == pytest.approx(255 * 0.5)
+
+
+def test_moon_disabled_or_unknown_phase_is_dark():
+    assert moon(enabled=False).level_at(minutes("23:00"), "full_moon") == 0
+    assert moon().level_at(minutes("23:00"), None) == 0
+
+
+def test_moon_validation():
+    with pytest.raises(ValueError):
+        moon(start="21:00", end="21:00")
+    with pytest.raises(ValueError):
+        moon(min=60, max=50)
+    with pytest.raises(ValueError):
+        moon(max=101)
+    with pytest.raises(ValueError):
+        moon(start="25:00")
+    assert moon(sensor="").sensor == lc.DEFAULT_MOON_SENSOR  # empty -> default
+    assert moon(start="21:00:00").start == "21:00"  # time selector format
+
+
+def test_moon_round_trip_and_phase_normalising():
+    m = moon()
+    assert lc.MoonlightSchedule.from_dict(m.to_dict()) == m
+    assert lc.normalize_moon_phase("Waxing Crescent") == "waxing_crescent"
+    assert lc.normalize_moon_phase("unavailable") is None
+    assert lc.normalize_moon_phase(None) is None
