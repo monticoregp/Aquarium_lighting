@@ -14,7 +14,14 @@ from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN
 from .coordinator import AquariumLightingCoordinator
-from .light_controller import ChannelSchedule, preview_curve
+from .light_controller import (
+    MOON_PHASES,
+    ChannelSchedule,
+    MoonlightSchedule,
+    normalize_moon_phase,
+    preview_curve,
+    preview_moon_curve,
+)
 
 _AUTO = {vol.Optional("auto_entity"): str}
 
@@ -52,6 +59,8 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_preview)
     websocket_api.async_register_command(hass, ws_set_channel)
     websocket_api.async_register_command(hass, ws_delete_channel)
+    websocket_api.async_register_command(hass, ws_moon_preview)
+    websocket_api.async_register_command(hass, ws_set_moonlight)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "aquarium_lighting/get", **_AUTO})
@@ -117,5 +126,61 @@ async def ws_delete_channel(hass: HomeAssistant, connection: websocket_api.Activ
         await coordinator.async_delete_channel(msg["name"])
     except ValueError as err:
         connection.send_error(msg["id"], "not_found", str(err))
+        return
+    connection.send_result(msg["id"], coordinator.snapshot())
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "aquarium_lighting/moon_preview",
+        vol.Required("moonlight"): dict,
+        vol.Optional("phase"): str,
+        vol.Optional("step", default=10): vol.All(int, vol.Range(min=1, max=120)),
+        **_AUTO,
+    }
+)
+@callback
+def ws_moon_preview(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Evaluate an UNSAVED moonlight draft for one phase (default: the sensor's phase).
+
+    Previews as if enabled, so the curve can be seen before switching it on.
+    """
+    coordinator = _resolve(hass, connection, msg)
+    if coordinator is None:
+        return
+    try:
+        draft = MoonlightSchedule.from_dict({**msg["moonlight"], "enabled": True})
+    except ValueError as err:
+        connection.send_error(msg["id"], "invalid_moonlight", str(err))
+        return
+    phase = (
+        normalize_moon_phase(msg["phase"])
+        if msg.get("phase")
+        else coordinator.peek_moon_phase(draft.sensor)
+    )
+    connection.send_result(
+        msg["id"],
+        {
+            "step": msg["step"],
+            "phase": phase,
+            "values": preview_moon_curve(draft, phase, msg["step"]),
+            "peaks": {p: draft.peak_percent(p) for p in MOON_PHASES},
+        },
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): "aquarium_lighting/set_moonlight", vol.Required("moonlight"): dict, **_AUTO}
+)
+@websocket_api.async_response
+async def ws_set_moonlight(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    coordinator = _resolve(hass, connection, msg)
+    if coordinator is None:
+        return
+    try:
+        await coordinator.async_set_moonlight(msg["moonlight"])
+    except ValueError as err:
+        connection.send_error(msg["id"], "invalid_moonlight", str(err))
         return
     connection.send_result(msg["id"], coordinator.snapshot())

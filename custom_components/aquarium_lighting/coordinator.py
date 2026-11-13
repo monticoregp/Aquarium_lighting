@@ -61,6 +61,7 @@ from .light_controller import (
     minute_of_day,
     normalize_moon_phase,
     preview_curve,
+    preview_moon_curve,
     validate_channel_name,
 )
 
@@ -282,11 +283,7 @@ class AquariumLightingCoordinator:
             "mode": self.mode,
             "now_minute": minute_of_day(now),
             "channels": {n: s.to_dict() for n, s in self.schedules.items()},
-            "moonlight": {
-                **self.moonlight.to_dict(),
-                "phase": self._moon_last_phase,
-                "peak_percent": self.moonlight.peak_percent(self._moon_last_phase),
-            },
+            "moonlight": self._moon_snapshot(now),
             "current": compute_all(self.schedules, now),
             "curves": {n: preview_curve(s, 10) for n, s in self.schedules.items()},
         }
@@ -373,6 +370,30 @@ class AquariumLightingCoordinator:
         if phase is not None:
             self._moon_last_phase = phase
         return self._moon_last_phase
+
+    def peek_moon_phase(self, sensor: str | None = None) -> str | None:
+        """Phase from ``sensor`` (default: the configured one) without latching anything.
+
+        Used by the card's preview; falls back to the last phase seen.
+        """
+        state = self.hass.states.get(sensor or self.moonlight.sensor)
+        return normalize_moon_phase(state.state if state else None) or self._moon_last_phase
+
+    def _moon_snapshot(self, now: datetime) -> dict[str, Any]:
+        """Moonlight block for the card. Read-only: never touches the night latch."""
+        cfg = self.moonlight
+        minute = minute_of_day(now)
+        if self._moon_night_phase is not None and cfg.in_window(minute):
+            phase = self._moon_night_phase
+        else:
+            phase = self._read_moon_phase()
+        return {
+            **cfg.to_dict(),
+            "phase": phase,
+            "peak_percent": cfg.peak_percent(phase),
+            "current": int(round(cfg.level_at(minute, phase))),
+            "curve": preview_moon_curve(cfg, phase, 10),
+        }
 
     def moon_level(self, when: datetime) -> int:
         """Moonlight brightness 0-255 at ``when``.

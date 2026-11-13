@@ -321,6 +321,16 @@ def preview_curve(schedule: ChannelSchedule, step_minutes: int = 10) -> list[int
     return [int(round(schedule.level_at(m))) for m in range(0, MINUTES_PER_DAY + 1, step)]
 
 
+def preview_moon_curve(
+    moonlight: MoonlightSchedule, phase: str | None, step_minutes: int = 10
+) -> list[int]:
+    """Moonlight brightness samples (0-255) for a full day at one moon phase."""
+    step = max(1, int(step_minutes))
+    return [
+        int(round(moonlight.level_at(m, phase))) for m in range(0, MINUTES_PER_DAY + 1, step)
+    ]
+
+
 def default_points(schedule: ChannelSchedule) -> list[list[Any]]:
     """Seed points that reproduce the schedule's current ramps.
 

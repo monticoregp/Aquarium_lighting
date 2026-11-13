@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.1
+- The schedule editor card now has a **Moonlight** tab next to the channels: on/off,
+  moon phase sensor, light entity (both with suggestions from your Home Assistant
+  entities), new moon / full moon brightness, nightly start and end. It shows a live
+  graph of the curve, can preview any moon phase, and warns about a missing sensor or
+  light before you save. No need to use the Configure dialog any more (it still works).
+- The card shows the moonlight in the "now" chips and, with **Show all channels**, as a
+  dimmed line in the channel graphs.
+- The graph-only card draws the moonlight when it is on (`show_moonlight: false` to hide).
+- New websocket commands `aquarium_lighting/moon_preview` and
+  `aquarium_lighting/set_moonlight`; the `get` result's `moonlight` block now also has
+  `current` and `curve`.
+- Changing the card script bumps the version so browsers load the new file. If the old
+  card still shows after updating, hard-refresh the page (Ctrl+F5).
+
 ## 0.4.0
 - New **moonlight**: one light entity per aquarium that follows the moon phase. Set
   it up under the integration's **Configure** (second page of the options). The moon

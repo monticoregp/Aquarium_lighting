@@ -7,6 +7,8 @@
  *       title: Reef lighting          # optional
  *       auto_entity: input_boolean.reef_auto_mode   # optional with one aquarium
  *       show_all: true                # optional: default state of "Show all channels"
+ *     The "Moonlight" tab next to the channels sets up the moonlight (on/off, moon
+ *     phase sensor, light, brightness at new/full moon, nightly start/end).
  *
  *  2. Graph only (for a main display): all channels at full strength + "now" line
  *       type: custom:aquarium-lighting-graph-card
@@ -14,6 +16,7 @@
  *       auto_entity: input_boolean.reef_auto_mode   # optional with one aquarium
  *       channels: [blue, white]       # optional: only show these
  *       show_legend: true             # optional (default true)
+ *       show_moonlight: true          # optional (default true): draw the moonlight when it is on
  *
  * With several aquariums, set auto_entity to pick which one a card shows.
  * Curve previews come from the same engine that drives the lights.
@@ -29,6 +32,30 @@ const CURVES = [
   ["parabolic", "Parabolic (ease in / out)"],
   ["multi_segment", "Multi-segment (custom points)"],
 ];
+
+/* ---------------------------------------------------------------- moonlight */
+const MOON_COLOR = "#8b9cf8";
+const MOON_PHASES = [
+  ["new_moon", "New moon"],
+  ["waxing_crescent", "Waxing crescent"],
+  ["first_quarter", "First quarter"],
+  ["waxing_gibbous", "Waxing gibbous"],
+  ["full_moon", "Full moon"],
+  ["waning_gibbous", "Waning gibbous"],
+  ["last_quarter", "Last quarter"],
+  ["waning_crescent", "Waning crescent"],
+];
+const moonPhase = (state) => {
+  const p = String(state ?? "").trim().toLowerCase().replace(/[ -]/g, "_");
+  return MOON_PHASES.some(([k]) => k === p) ? p : null;
+};
+const phaseLabel = (p) => (MOON_PHASES.find(([k]) => k === p) || [0, "unknown"])[1];
+const MOON_DEFAULTS = { enabled: false, sensor: "sensor.moon_phase", target: "", start: "21:00", end: "01:00", min: 10, max: 50 };
+const hm = (v) => {
+  const [h, m] = String(v).split(":").map(Number);
+  return h * 60 + m;
+};
+const round1 = (x) => Math.round(x * 10) / 10;
 
 /* ---------------------------------------------------------------- colours */
 const FALLBACK = ["#3b82f6", "#e6f0ff", "#8b5cf6", "#ffb000", "#22c55e", "#ef2b2b", "#22d3ee", "#e11d9c"];
@@ -146,6 +173,15 @@ class AquariumLightingCard extends HTMLElement {
     this._series = [];
     this._error = "";
     this._previewTimer = null;
+    // moonlight tab
+    this._view = "channel"; // "channel" | "moon"
+    this._mdraft = null;
+    this._mdirty = false;
+    this._mcurve = [];
+    this._mphase = ""; // preview phase; "" = what the sensor says now
+    this._mphaseNow = null;
+    this._mpeaks = null;
+    this._mpreviewTimer = null;
   }
 
   setConfig(config) {
@@ -200,11 +236,69 @@ class AquariumLightingCard extends HTMLElement {
       this._dirty = false;
     }
     if (!this._dirty) this._resetDraft();
+    if (!this._mdirty) this._resetMoonDraft();
     this._syncAuto();
     this._renderNow();
     this._renderTabs();
-    if (!this._dirty || !this._form_built) this._renderForm();
-    this._requestPreview();
+    if (this._view === "moon") {
+      if (!this._mdirty || !this._form_built) this._renderMoonForm();
+      this._requestMoonPreview();
+    } else {
+      if (!this._dirty || !this._form_built) this._renderForm();
+      this._requestPreview();
+    }
+  }
+
+  _resetMoonDraft() {
+    const m = this._data?.moonlight || {};
+    this._mdraft = Object.fromEntries(Object.keys(MOON_DEFAULTS).map((k) => [k, m[k] ?? MOON_DEFAULTS[k]]));
+    this._mdirty = false;
+  }
+
+  _moonPayload() {
+    const d = this._mdraft;
+    return {
+      enabled: !!d.enabled,
+      sensor: d.sensor || "",
+      target: d.target || "",
+      start: d.start,
+      end: d.end,
+      min: Number(d.min),
+      max: Number(d.max),
+    };
+  }
+
+  _requestMoonPreview() {
+    clearTimeout(this._mpreviewTimer);
+    this._mpreviewTimer = setTimeout(async () => {
+      if (!this._mdraft) return;
+      try {
+        const msg = { type: "aquarium_lighting/moon_preview", moonlight: this._moonPayload(), step: STEP };
+        if (this._mphase) msg.phase = this._mphase;
+        const r = await this._ws(msg);
+        this._mcurve = r.values;
+        this._mpeaks = r.peaks;
+        this._mphaseNow = r.phase;
+        this._error = "";
+      } catch (e) {
+        this._mcurve = [];
+        this._error = e.message || String(e);
+      }
+      this._drawGraph();
+      this._renderMoonInfo();
+    }, 150);
+  }
+
+  async _saveMoon() {
+    try {
+      await this._ws({ type: "aquarium_lighting/set_moonlight", moonlight: this._moonPayload() });
+      this._mdirty = false;
+      this._status("Moonlight saved");
+      await this._load();
+    } catch (e) {
+      this._error = e.message || String(e);
+      this._drawGraph();
+    }
   }
 
   _resetDraft() {
@@ -269,6 +363,7 @@ class AquariumLightingCard extends HTMLElement {
   async _addChannel() {
     const raw = prompt("Channel name (letters, numbers, underscores), e.g. blue, cool_white, red, uv");
     if (!raw) return;
+    if (this._view === "moon" && this._mdirty && !confirm("Discard unsaved moonlight changes?")) return;
     const name = raw.trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_").slice(0, 32);
     if (!name) return;
     try {
@@ -279,6 +374,8 @@ class AquariumLightingCard extends HTMLElement {
       });
       this._sel = name;
       this._dirty = false;
+      this._view = "channel";
+      this._mdirty = false;
       await this._load();
       this._renderForm();
     } catch (e) {
@@ -299,15 +396,69 @@ class AquariumLightingCard extends HTMLElement {
     }
   }
 
-  _selectChannel(name) {
-    if (name === this._sel) return;
-    if (this._dirty && !confirm("Discard unsaved changes?")) return;
-    this._sel = name;
+  /** Switch between a channel and the moonlight tab (asks before dropping edits). */
+  _switchView(view, name) {
+    if (view === this._view && (view === "moon" || name === this._sel)) return;
+    const dirty = this._view === "moon" ? this._mdirty : this._dirty;
+    if (dirty && !confirm("Discard unsaved changes?")) return;
+    this._view = view;
+    if (view === "channel") this._sel = name;
+    this._error = "";
     this._resetDraft();
+    this._resetMoonDraft();
     this._renderNow();
     this._renderTabs();
-    this._renderForm();
-    this._requestPreview();
+    if (view === "moon") {
+      this._renderMoonForm();
+      this._requestMoonPreview();
+    } else {
+      this._renderForm();
+      this._requestPreview();
+    }
+    this._drawGraph();
+  }
+
+  _markMoonDirty() {
+    this._mdirty = true;
+    const save = this._root("msave");
+    const revert = this._root("mrevert");
+    if (save) save.disabled = false;
+    if (revert) revert.disabled = false;
+  }
+
+  _onMoonInput(e) {
+    const t = e.target;
+    const d = this._mdraft;
+    if (!d) return;
+    if (t.dataset.mphase !== undefined) {
+      this._mphase = t.value; // preview only, not part of the saved settings
+      this._requestMoonPreview();
+      return;
+    }
+    const k = t.dataset.m;
+    if (!k) return;
+    let v = t.type === "checkbox" ? t.checked : t.value;
+    const sync = (key) => {
+      const slider = this.shadowRoot.querySelector(`input[data-m="${key}"]`);
+      const out = this.shadowRoot.querySelector(`output[data-for="m_${key}"]`);
+      if (slider) slider.value = d[key];
+      if (out) out.textContent = `${d[key]}%`;
+    };
+    if (k === "min" || k === "max") {
+      v = Number(v);
+      d[k] = v;
+      // keep new moon <= full moon by dragging the other slider along
+      if (k === "min" && v > Number(d.max)) d.max = v;
+      if (k === "max" && v < Number(d.min)) d.min = v;
+      sync("min");
+      sync("max");
+    } else {
+      if (k === "sensor" || k === "target") v = String(v).trim();
+      d[k] = v;
+    }
+    this._markMoonDirty();
+    this._requestMoonPreview();
+    this._renderMoonInfo();
   }
 
   _seedPoints() {
@@ -373,7 +524,14 @@ class AquariumLightingCard extends HTMLElement {
       this._requestPreview();
     } else if (act === "delete") this._deleteChannel();
     else if (act === "add") this._addChannel();
-    else if (act === "tab") this._selectChannel(arg);
+    else if (act === "tab") this._switchView("channel", arg);
+    else if (act === "moon") this._switchView("moon");
+    else if (act === "msave") this._saveMoon();
+    else if (act === "mrevert") {
+      this._resetMoonDraft();
+      this._renderMoonForm();
+      this._requestMoonPreview();
+    }
     else if (act === "color") {
       this._draft.color = arg;
       this._markDirty();
@@ -453,6 +611,9 @@ class AquariumLightingCard extends HTMLElement {
         .showall { flex-direction: row; align-items: center; gap: 6px; cursor: pointer; }
         .readout { min-height: 1.3em; font-size: .85rem; color: var(--secondary-text-color); font-variant-numeric: tabular-nums; }
         #fatal { color: var(--error-color); }
+        .moonhead { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: .95rem; cursor: pointer; }
+        .moonhead input { width: 18px; height: 18px; padding: 0; }
+        .tabs button.moon:not(.sel) { border-color: ${MOON_COLOR}; }
       </style>
       <ha-card>
         <div class="head">
@@ -473,7 +634,7 @@ class AquariumLightingCard extends HTMLElement {
       </ha-card>`;
     const sw = this._root("auto");
     sw.addEventListener("change", () => this._toggleAuto(sw.checked));
-    this._root("form").addEventListener("input", (e) => this._onInput(e));
+    this._root("form").addEventListener("input", (e) => (this._view === "moon" ? this._onMoonInput(e) : this._onInput(e)));
     this._root("showall").addEventListener("change", (e) => {
       this._showAll = e.target.checked;
       try {
@@ -503,13 +664,17 @@ class AquariumLightingCard extends HTMLElement {
   _renderNow() {
     const cur = this._data.current || {};
     const colors = this._colors();
-    this._root("now").innerHTML = Object.entries(cur).map(([n, v]) => chip(n, colors[n], `${v} (${pct(v)}%)`)).join("");
+    const m = this._data.moonlight;
+    this._root("now").innerHTML =
+      Object.entries(cur).map(([n, v]) => chip(n, colors[n], `${v} (${pct(v)}%)`)).join("") +
+      (m && m.enabled ? chip("moonlight", MOON_COLOR, `${m.current} (${pct(m.current)}%)`) : "");
   }
 
   _renderTabs() {
     const names = Object.keys(this._data.channels);
     this._root("tabs").innerHTML =
-      names.map((n) => `<button data-act="tab:${esc(n)}" class="${n === this._sel ? "sel" : ""}">${esc(n)}</button>`).join("") +
+      names.map((n) => `<button data-act="tab:${esc(n)}" class="${this._view === "channel" && n === this._sel ? "sel" : ""}">${esc(n)}</button>`).join("") +
+      `<button data-act="moon" class="moon ${this._view === "moon" ? "sel" : ""}" title="Moonlight settings">\u{1F319} Moonlight</button>` +
       `<button data-act="add" title="Add channel">+ Add channel</button>`;
   }
 
@@ -567,18 +732,104 @@ class AquariumLightingCard extends HTMLElement {
       </div>`;
   }
 
+  _renderMoonForm() {
+    const el = this._root("form");
+    const d = this._mdraft;
+    this._form_built = true;
+    const states = this._hass.states;
+    const label = (id) => states[id]?.attributes?.friendly_name || "";
+    const opt = (id) => `<option value="${esc(id)}">${esc(label(id))}</option>`;
+    // Suggest sensors that already report a moon phase; any entity id can still be typed.
+    const sensors = Object.keys(states).filter((id) => id.startsWith("sensor.") && (moonPhase(states[id].state) || id === d.sensor));
+    const lights = Object.keys(states).filter((id) => id.startsWith("light."));
+    const range = (k, text) =>
+      `<label>${text} <output data-for="m_${k}">${d[k]}%</output>
+         <input type="range" min="0" max="100" step="1" data-m="${k}" value="${d[k]}"></label>`;
+    const now = this._data?.moonlight?.phase;
+    el.innerHTML = `
+      <label class="moonhead"><input type="checkbox" data-m="enabled" ${d.enabled ? "checked" : ""}>
+        <span>Moonlight on <span class="muted">(only runs while Auto mode is on)</span></span></label>
+      <div class="grid">
+        <label>Moon phase sensor
+          <input type="text" list="m_sensors" data-m="sensor" value="${esc(d.sensor)}" placeholder="sensor.moon_phase" autocomplete="off" spellcheck="false"></label>
+        <label>Moonlight (light entity)
+          <input type="text" list="m_lights" data-m="target" value="${esc(d.target)}" placeholder="light.reef_moon" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <datalist id="m_sensors">${sensors.map(opt).join("")}</datalist>
+      <datalist id="m_lights">${lights.map(opt).join("")}</datalist>
+      <div class="grid">
+        ${range("min", "New moon brightness")}${range("max", "Full moon brightness")}
+        <label>Start<input type="time" data-m="start" value="${esc(d.start)}"></label>
+        <label>End<input type="time" data-m="end" value="${esc(d.end)}"></label>
+      </div>
+      <label>Preview phase
+        <select data-mphase>
+          <option value="">Now: ${esc(now ? phaseLabel(now) : "unknown")}</option>
+          ${MOON_PHASES.map(([k, l]) => `<option value="${k}" ${k === this._mphase ? "selected" : ""}>${l}</option>`).join("")}
+        </select></label>
+      <div class="muted" id="minfo" style="margin-top:8px"></div>
+      <div class="err" id="mwarn"></div>
+      <div class="actions">
+        <button class="primary" id="msave" data-act="msave" ${this._mdirty ? "" : "disabled"}>Save moonlight</button>
+        <button id="mrevert" data-act="mrevert" ${this._mdirty ? "" : "disabled"}>Revert</button>
+      </div>`;
+    this._renderMoonInfo();
+  }
+
+  /** Warnings about the draft + a summary of what the preview shows. */
+  _renderMoonInfo() {
+    const info = this._root("minfo");
+    const warn = this._root("mwarn");
+    const d = this._mdraft;
+    if (!info || !warn || !d) return;
+    const st = this._hass.states;
+    const problems = [];
+    if (!d.sensor) problems.push("Enter the moon phase sensor (the Moon integration provides sensor.moon_phase).");
+    else if (!st[d.sensor]) problems.push(`${d.sensor} was not found.`);
+    else if (!moonPhase(st[d.sensor].state)) problems.push(`${d.sensor} reports "${st[d.sensor].state}", which is not a moon phase.`);
+    if (d.enabled && !d.target) problems.push("Choose the light to use as moonlight.");
+    else if (d.target && !st[d.target]) problems.push(`${d.target} was not found.`);
+    warn.textContent = problems.join(" ");
+
+    const peaks = this._mpeaks;
+    if (!peaks) {
+      info.textContent = "";
+      return;
+    }
+    const p = (k) => `${round1(peaks[k])}%`;
+    const steps = `new moon ${p("new_moon")}, crescent ${p("waxing_crescent")}, quarter ${p("first_quarter")}, gibbous ${p("waxing_gibbous")}, full moon ${p("full_moon")}`;
+    const ph = this._mphaseNow;
+    const span = (hm(d.end) - hm(d.start) + DAY) % DAY;
+    const mid = (hm(d.start) + span / 2) % DAY;
+    const shown = ph ? `Graph: ${phaseLabel(ph)}, peak ${p(ph)} at ${fmt(mid)}.` : "No moon phase available, so the graph is flat.";
+    info.textContent = `Peak by phase (the waning side mirrors the waxing side): ${steps}. ${shown}`;
+  }
+
   _drawGraph() {
     const svg = this._root("graph");
     if (!svg || !this._data) return;
     const colors = this._colors();
     const series = [];
-    if (this._showAll) {
-      for (const [n, vals] of Object.entries(this._data.curves || {})) {
-        if (n !== this._sel) series.push({ name: n, color: colors[n], values: vals, width: 2, opacity: 0.5 });
+    const moon = this._data.moonlight;
+    if (this._view === "moon") {
+      if (this._showAll) {
+        for (const [n, vals] of Object.entries(this._data.curves || {})) {
+          series.push({ name: n, color: colors[n], values: vals, width: 2, opacity: 0.5 });
+        }
       }
-    }
-    if (this._sel && this._curve.length) {
-      series.push({ name: this._sel, color: colors[this._sel], values: this._curve, width: 3, opacity: 1, fill: 0.15 });
+      if (this._mcurve.length) {
+        series.push({ name: "moonlight", color: MOON_COLOR, values: this._mcurve, width: 3, opacity: 1, fill: 0.2 });
+      }
+    } else {
+      if (this._showAll) {
+        for (const [n, vals] of Object.entries(this._data.curves || {})) {
+          if (n !== this._sel) series.push({ name: n, color: colors[n], values: vals, width: 2, opacity: 0.5 });
+        }
+        if (moon && moon.enabled && moon.curve) series.push({ name: "moonlight", color: MOON_COLOR, values: moon.curve, width: 2, opacity: 0.5 });
+      }
+      if (this._sel && this._curve.length) {
+        series.push({ name: this._sel, color: colors[this._sel], values: this._curve, width: 3, opacity: 1, fill: 0.15 });
+      }
     }
     this._series = series;
     svg.innerHTML = graphMarkup(series, this._data.now_minute);
@@ -671,9 +922,13 @@ class AquariumLightingGraphCard extends HTMLElement {
     const series = names
       .filter((n) => data.curves[n])
       .map((n) => ({ name: n, color: colors[n], values: data.curves[n], width: 3, opacity: 1 }));
+    const moon = data.moonlight;
+    const showMoon = !!(moon && moon.enabled && moon.curve && this._config.show_moonlight !== false);
+    if (showMoon) series.push({ name: "moonlight", color: MOON_COLOR, values: moon.curve, width: 3, opacity: 1 });
     this.shadowRoot.getElementById("graph").innerHTML = graphMarkup(series, data.now_minute);
     this.shadowRoot.getElementById("now").innerHTML = this._config.show_legend
-      ? names.map((n) => chip(n, colors[n], `${data.current[n]} (${pct(data.current[n])}%)`)).join("")
+      ? names.map((n) => chip(n, colors[n], `${data.current[n]} (${pct(data.current[n])}%)`)).join("") +
+        (showMoon ? chip("moonlight", MOON_COLOR, `${moon.current} (${pct(moon.current)}%)`) : "")
       : "";
   }
 }
@@ -690,12 +945,12 @@ window.customCards = window.customCards || [];
   {
     type: "aquarium-lighting-card",
     name: "Aquarium Lighting schedule editor",
-    description: "Edit per-channel sunrise/sunset schedules, curves, colours and brightness limits, with a live preview.",
+    description: "Edit per-channel sunrise/sunset schedules, curves, colours and brightness limits, and set up the moonlight, with a live preview.",
   },
   {
     type: "aquarium-lighting-graph-card",
     name: "Aquarium Lighting graph",
-    description: "Graph-only view of every channel's brightness over 24 hours, with a current-time line.",
+    description: "Graph-only view of every channel's (and the moonlight's) brightness over 24 hours, with a current-time line.",
   },
 ].forEach((card) => {
   if (!window.customCards.some((c) => c.type === card.type)) window.customCards.push(card);

@@ -322,3 +322,56 @@ async def test_full_tick_drives_channels_and_moonlight_together(hass, freezer):
     assert by_entity["light.moon"] == 51
     assert "light.reef_blue" in by_entity  # the channel schedule is still driven
     assert c._failing == set()
+
+
+# --------------------------------------------------------------------------- #
+# moonlight websocket API (used by the editor card)
+# --------------------------------------------------------------------------- #
+_DRAFT = {"sensor": "sensor.moon_phase", "target": "light.moon", "start": "21:00", "end": "01:00", "min": 10, "max": 50}
+
+
+async def test_ws_moon_preview_uses_sensor_phase_and_ignores_enabled(hass, hass_ws_client):
+    await _moon_setup(hass, phase="waxing_crescent", enabled=False)
+    client = await hass_ws_client(hass)
+    await client.send_json({"id": 1, "type": "aquarium_lighting/moon_preview", "moonlight": {**_DRAFT, "enabled": False}})
+    res = (await client.receive_json())["result"]
+    assert res["phase"] == "waxing_crescent" and res["step"] == 10
+    assert len(res["values"]) == 145
+    assert res["values"][138] == 51  # 23:00 -> 20% of 255 even though disabled
+    assert res["values"][60] == 0  # 10:00 outside the window
+    assert res["peaks"]["new_moon"] == 10 and res["peaks"]["full_moon"] == 50
+
+    # explicit phase overrides the sensor; the draft's own values are used
+    await client.send_json({"id": 2, "type": "aquarium_lighting/moon_preview", "phase": "full_moon", "moonlight": {**_DRAFT, "max": 100}})
+    res = (await client.receive_json())["result"]
+    assert res["phase"] == "full_moon" and res["values"][138] == 255
+
+    await client.send_json({"id": 3, "type": "aquarium_lighting/moon_preview", "moonlight": {**_DRAFT, "min": 90}})
+    msg = await client.receive_json()
+    assert not msg["success"] and msg["error"]["code"] == "invalid_moonlight"
+
+
+async def test_ws_set_moonlight_saves_and_updates_entities(hass, hass_ws_client, hass_admin_user):
+    entry = await _setup(hass)
+    c = hass.data[DOMAIN][entry.entry_id]
+    client = await hass_ws_client(hass)
+    await client.send_json({"id": 1, "type": "aquarium_lighting/set_moonlight", "moonlight": {**_DRAFT, "enabled": True, "max": 70}})
+    res = await client.receive_json()
+    assert res["success"] and res["result"]["moonlight"]["max"] == 70
+    assert c.moonlight.enabled and c.moonlight.target == "light.moon"
+    assert hass.states.get("number.reef_moonlight_full_moon_brightness").state == "70.0"
+    assert hass.states.get("switch.reef_moonlight_enabled").state == "on"
+
+    await client.send_json({"id": 2, "type": "aquarium_lighting/set_moonlight", "moonlight": {**_DRAFT, "start": "09:00", "end": "09:00"}})
+    msg = await client.receive_json()
+    assert not msg["success"] and msg["error"]["code"] == "invalid_moonlight"
+    assert c.moonlight.max == 70  # unchanged
+
+
+async def test_snapshot_moonlight_block_is_read_only(hass):
+    _entry, c = await _moon_setup(hass, phase="first_quarter")
+    assert c._moon_night_phase is None
+    snap = c.snapshot()["moonlight"]
+    assert snap["phase"] == "first_quarter" and snap["peak_percent"] == 30
+    assert len(snap["curve"]) == 145 and max(snap["curve"]) == 76
+    assert c._moon_night_phase is None  # snapshot never latches the night's phase

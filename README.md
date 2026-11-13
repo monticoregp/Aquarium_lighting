@@ -13,6 +13,7 @@ entirely inside Home Assistant: no automations, no SQL, no cloud.
   usable from any card, script, automation or voice assistant
 - Two Lovelace cards: a full schedule editor with live curve preview, and a
   graph-only card for a main display
+- Optional moonlight that follows the moon phase, set up from the editor card
 - Brightness is never stored; it is always computed from schedule + clock
 
 Requires Home Assistant **2024.11 or newer**.
@@ -41,7 +42,8 @@ and restart Home Assistant.
    - Step 2: name and target of your first channel.
    - Run the integration again for another aquarium; each uses its own toggle.
 3. Add the cards to a dashboard (see **Lovelace cards**). More channels, targets,
-   schedules and colours are all edited from the editor card.
+   schedules and colours are all edited from the editor card, and so is the optional
+   moonlight (its **Moonlight** tab, see **Moonlight**).
 4. Turn the toggle on when you are ready. Auto mode follows the toggle, so it
    survives restarts the way any helper does (HA restores its state).
 
@@ -168,9 +170,36 @@ HA light entities and use `ha_light`.
 
 ## Moonlight
 
-A dim light that follows the moon, one per aquarium. Set it up in **Settings >
-Devices & services > Aquarium Lighting > Configure**: press Submit on the first page
-(output mode and transitions, unchanged), then fill in the second page.
+A dim light that follows the moon, one per aquarium.
+
+### Setting it up
+
+**In the editor card (easiest).** Open the schedule editor card and click the
+**Moonlight** tab (next to your channels), fill it in and press **Save moonlight**:
+
+1. Tick **Moonlight on**.
+2. **Moon phase sensor**: leave `sensor.moon_phase` (from the Moon integration) or type
+   another. The box suggests sensors that currently report a moon phase.
+3. **Moonlight (light entity)**: pick the light; the box lists your `light.*` entities.
+4. Set **New moon brightness** and **Full moon brightness** (%), and the nightly
+   **Start** and **End** time (may cross midnight).
+
+While you edit, the graph shows the moonlight curve for tonight's phase, and **Preview
+phase** lets you see any other phase without waiting for it. Nothing changes on your
+light until you press Save. The card warns you if the sensor or light does not exist,
+if the sensor does not report a moon phase, or if you enabled the moonlight without a
+light. Saving requires an HA admin user.
+
+**In Home Assistant's Configure dialog.** The same settings are on the second page of
+**Settings > Devices & services > Aquarium Lighting > Configure** (press Submit on the
+first page, the output mode and transitions, to reach it). Both places edit the same
+settings.
+
+**With entities.** Once set up, the on/off, brightness and time settings are also
+entities (see **Entities**), handy for automations. The sensor and the light can only
+be chosen in the card or the Configure dialog.
+
+### The settings
 
 | Setting | Meaning |
 |---|---|
@@ -227,7 +256,7 @@ The moonlight (below) has its own device, **Reef Moonlight**, with
 `switch.<aquarium>_moonlight_enabled`, `number.<aquarium>_moonlight_new_moon_brightness`,
 `number.<aquarium>_moonlight_full_moon_brightness` (both in %),
 `time.<aquarium>_moonlight_start_time` and `time.<aquarium>_moonlight_end_time`.
-The moon phase sensor and the light are chosen in the options (not entities).
+The moon phase sensor and the light are chosen in the editor card's Moonlight tab or the Configure dialog (they are not entities).
 
 - They are **views of the schedule**, not separate settings: edit one here and the
   editor card shows it; save in the card and these update. If auto mode is on, a
@@ -263,7 +292,7 @@ show_all: true                             # optional: default for "Show all cha
 ```
 
 - Auto-mode toggle (the `input_boolean`).
-- One tab per channel, plus **Add channel**.
+- One tab per channel, plus a **Moonlight** tab and **Add channel**.
 - Sunrise/sunset times, min/max sliders, curve selector, multi-segment point editor,
   graph colour (presets for common LED colours plus a free colour picker), output
   target.
@@ -272,6 +301,12 @@ show_all: true                             # optional: default for "Show all cha
   remembered in the browser). A dashed line marks "now", and hovering lists every
   visible channel's level at that time.
 - Saving and deleting require an HA admin user.
+- The **Moonlight** tab edits the moonlight (see **Moonlight**) with its own **Save
+  moonlight** and **Revert** buttons; its graph shows the curve for the current or a
+  chosen moon phase. When the moonlight is on, it also appears in the "now" chips and,
+  with **Show all channels**, as a dimmed line in the channel graphs.
+- Switching between a channel and the Moonlight tab asks before throwing away unsaved
+  edits.
 
 ![Alt text](images/config_card.png)
 
@@ -283,10 +318,12 @@ title: Lighting                            # optional; omit for no header
 auto_entity: input_boolean.reef_auto_mode  # optional with one aquarium
 channels: [blue, cool_white, red]          # optional: only these channels
 show_legend: true                          # optional: channel names + current %
+show_moonlight: true                       # optional (default true): draw the moonlight when it is on
 ```
 
 Every channel is drawn at full opacity in its own colour with the current-time
-line, refreshed every minute. Very light or very dark colours get a thin grey
+line, refreshed every minute. When the moonlight is on, it is drawn too (for the
+current moon phase) in a soft blue; set `show_moonlight: false` to leave it out. Very light or very dark colours get a thin grey
 outline so they stay visible on any theme.
 
 ![Alt text](images/display_card.png)
@@ -299,10 +336,15 @@ outline so they stay visible on any theme.
 | `aquarium_lighting/preview` | `schedule`, `step` (1-120) | evaluates an unsaved draft |
 | `aquarium_lighting/set_channel` | `name`, `schedule`, `auto_entity` (optional) | admin; validates and saves; triggers an immediate re-apply when auto is on |
 | `aquarium_lighting/delete_channel` | `name`, `auto_entity` (optional) | admin |
+| `aquarium_lighting/moon_preview` | `moonlight`, `phase` (optional), `step`, `auto_entity` (optional) | evaluates an unsaved moonlight draft (as if on) for one phase; default is the sensor's phase. Returns `values`, `phase` and the `peaks` of all eight phases |
+| `aquarium_lighting/set_moonlight` | `moonlight`, `auto_entity` (optional) | admin; validates and saves; applied immediately when auto is on |
+
+`get` also returns a `moonlight` block: the settings plus `phase`, `peak_percent`,
+`current` (0-255 now) and `curve` (10-minute samples for the current phase).
 
 Turn auto mode on or off by calling `input_boolean.turn_on` / `turn_off` on the toggle.
 
-Validation errors come back as `invalid_schedule` with a readable message.
+Validation errors come back as `invalid_schedule` (or `invalid_moonlight`) with a readable message.
 
 ---
 
@@ -339,7 +381,7 @@ custom_components/aquarium_lighting/
   card_resource.py     serves the card script and registers it as a dashboard resource
   const.py             constants
   strings.json, translations/en.json
-  frontend/aquarium-lighting-card.js   Lovelace cards (editor + graph-only)
+  frontend/aquarium-lighting-card.js   Lovelace cards (editor incl. Moonlight tab + graph-only)
 esphome/aquarium-light.yaml            example node with smoothing
 tests/test_light_controller.py         engine tests (run with pytest, no HA needed)
 ```
